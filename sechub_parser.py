@@ -21,11 +21,7 @@ containerTag = os.environ['docker_tag']
 with open('results.json') as json_file:
     data = json.load(json_file)
 
-    # Ensure the data structure aligns with Trivy v0.58.0
-    if not data or not isinstance(data, list):
-        print("No valid results found in the Trivy output.")
-    else:
-        for result in data:
+    for result in data:
             # Navigate through the updated structure for vulnerabilities
             vulnerabilities = result.get('Vulnerabilities', [])
 
