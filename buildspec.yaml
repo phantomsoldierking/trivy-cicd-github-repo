@@ -5,6 +5,8 @@ phases:
     runtime-versions:
       python: 3.8
     commands:
+    - "curl -sL https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -"
+    - "curl -sL https://dl.google.com/linux/linux_signing_key.pub | apt-key add -"
     - "apt update"
     - "apt install -y wget dpkg"
     - "pip3 install boto3"
