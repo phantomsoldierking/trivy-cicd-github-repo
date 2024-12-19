@@ -25,5 +25,12 @@ phases:
   post_build:
     commands:
     - echo trivy scan completed on `date`
+    - git config --global user.name "phantomsoldierking"
+    - git config --global user.email "patilyogeshgouda@gmail.com"
+    - git add result.json
+    - git clone https://github.com/phantomsoldierking/trivy-cicd-github-repo.git
+    - cd trivy-cicd-github-repo
+    - git commit -m "Add Trivy scan results"
+    - git push origin -u main
     - python3 sechub_parser.py
     - echo Report Sent to Security Hub on `date`
