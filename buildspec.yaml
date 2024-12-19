@@ -5,8 +5,8 @@ phases:
     runtime-versions:
       python: 3.8
     commands:
-    - "yum update -y"
-    - "yum install -y rpm wget"
+    - "apt update"
+    - "apt install -y wget dpkg"
     - "pip3 install boto3"
     - "wget https://github.com/aquasecurity/trivy/releases/download/v0.1.6/trivy_0.1.6_Linux-64bit.deb"
     - "dpkg -i trivy_0.1.6_Linux-64bit.deb"
