@@ -18,8 +18,8 @@ phases:
     - "docker build -t $docker_img_name:$docker_tag ."
   build:
     commands:
-    - trivy --exit-code 0 -f json -o result.json image trivy-ci-test $docker_img_name:$docker_tag
-    - trivy --exit-code 1 -f json -o result.json image trivy-ci-test $docker_img_name:$docker_tag
+    - trivy image $docker_img_name:$docker_tag
+    - trivy --exit-code 1 -f json -o result.json image $docker_img_name:$docker_tag
     - docker tag $docker_img_name:$docker_tag $ecr_repo:latest
     - docker push $ecr_repo:latest
   post_build:
