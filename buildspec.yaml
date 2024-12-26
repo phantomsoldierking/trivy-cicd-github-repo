@@ -15,7 +15,6 @@ phases:
   pre_build:
     commands:
     - "$(aws ecr get-login --no-include-email --region $AWS_DEFAULT_REGION)"
-    - "echo 'Yogshe@123' | docker login -u 'patilyogeshgouda@gmail.com' --password-stdin"
     - "docker build -t $docker_img_name:$docker_tag ."
   build:
     commands:
