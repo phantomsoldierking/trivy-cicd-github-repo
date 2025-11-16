@@ -1,0 +1,156 @@
+services:
+  # LocalStack - AWS Service Emulator
+  localstack:
+    image: localstack/localstack:4.9.0
+    container_name: security-localstack
+    ports:
+      - "4566:4566"            # LocalStack Gateway
+      - "4510-4559:4510-4559"  # External services port range
+    environment:
+      - SERVICES=s3,ecr,sts,secretsmanager,cloudwatch,logs
+      - DEBUG=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - LAMBDA_EXECUTOR=docker-reuse
+      - PERSISTENCE=1
+      - DATA_DIR=/var/lib/localstack/data
+    volumes:
+      - "./localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "localstack_data:/var/lib/localstack"
+    networks:
+      - security-net
+
+  # PostgreSQL - Data Storage
+  postgres:
+    build:
+      context: ./database
+    container_name: security-postgres
+    environment:
+      - POSTGRES_DB=security_db
+      - POSTGRES_USER=security_user
+      - POSTGRES_PASSWORD=security_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - "./database/init.sql:/docker-entrypoint-initdb.d/init.sql"
+      - "postgres_data:/var/lib/postgresql/data"
+    networks:
+      - security-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U security_user -d security_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MLflow - ML Model Tracking
+  mlflow:
+    build:
+      context: ./mlflow
+      dockerfile: Dockerfile
+    container_name: security-mlflow
+    ports:
+      - "5000:5000"
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=postgresql://security_user:security_pass@postgres:5432/security_db
+      - MLFLOW_ARTIFACT_ROOT=/mlflow/artifacts
+      - MLFLOW_CORS_ORIGINS=*          # allow cross origin (for UI)
+    volumes:
+      - "mlflow_data:/mlflow"
+    # Add --allowed-hosts="*" here
+    command: >
+      mlflow server
+      --backend-store-uri postgresql://security_user:security_pass@postgres:5432/security_db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0
+      --port 5000
+      --allowed-hosts="*"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - security-net
+
+
+  # Scanner Service
+  scanner:
+    build:
+      context: ./scanner
+      dockerfile: Dockerfile
+    container_name: security-scanner
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_DEFAULT_REGION=us-east-1
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=security_db
+      - DB_USER=security_user
+      - DB_PASSWORD=security_pass
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./scanner:/app"
+      - "./test_images:/test_images"
+    depends_on:
+      - localstack
+      - postgres
+    networks:
+      - security-net
+    command: tail -f /dev/null  # Keep alive for manual execution
+
+  # ML Service
+  ml_service:
+    build:
+      context: ./ml
+      dockerfile: Dockerfile
+    container_name: security-ml
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=security_db
+      - DB_USER=security_user
+      - DB_PASSWORD=security_pass
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - "./ml:/app"
+      - "ml_models:/models"
+    depends_on:
+      - postgres
+      - mlflow
+    networks:
+      - security-net
+    command: tail -f /dev/null
+
+  # Dashboard
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: security-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=security_db
+      - DB_USER=security_user
+      - DB_PASSWORD=security_pass
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - "./dashboard:/app"
+    depends_on:
+      - postgres
+      - mlflow
+    networks:
+      - security-net
+    command: streamlit run app.py --server.address 0.0.0.0
+
+volumes:
+  localstack_data:
+  postgres_data:
+  mlflow_data:
+  ml_models:
+
+networks:
+  security-net:
+    driver: bridge
