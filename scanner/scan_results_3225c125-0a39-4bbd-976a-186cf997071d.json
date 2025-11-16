@@ -1,0 +1,11 @@
+{
+  "scan_id": "3225c125-0a39-4bbd-976a-186cf997071d",
+  "image_name": "test-app",
+  "image_tag": "vulnerable",
+  "total_vulnerabilities": 0,
+  "severity_counts": {},
+  "vulnerabilities": [],
+  "scan_duration": 0,
+  "error": "syntax error at or near \"references\"\nLINE 5:                         references, published_date, last_mod...\n                                ^\n",
+  "scan_timestamp": "2025-11-15T10:05:04.272829"
+}
