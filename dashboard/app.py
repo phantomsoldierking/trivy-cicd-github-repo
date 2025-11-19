@@ -22,7 +22,6 @@ st.set_page_config(
 )
 
 # Database connection
-@st.cache_resource
 def get_db_connection():
     """Create database connection"""
     return psycopg2.connect(

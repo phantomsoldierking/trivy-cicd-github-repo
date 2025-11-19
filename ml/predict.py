@@ -9,12 +9,22 @@ import json
 import pickle
 import numpy as np
 import psycopg2
+import psycopg2.extras
 from datetime import datetime
 import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _py(x):
+        """Convert numpy types → Python native types"""
+        if isinstance(x, (np.bool_, bool)):
+            return bool(x)
+        if isinstance(x, (np.int64, np.int32, int)):
+            return int(x)
+        if isinstance(x, (np.float32, np.float64, float)):
+            return float(x)
+        return x
 
 class SecurityPredictor:
     """Make predictions on new vulnerability scans"""
@@ -153,24 +163,36 @@ class SecurityPredictor:
             risk_category = 'low'
         
         # Get feature importance (top contributing features)
-        feature_importance = self.risk_model.feature_importances_
+        # Feature importances from the risk model
+        importances = self.risk_model.feature_importances_
+
         feature_names = [
             'total_vulnerabilities', 'critical_count', 'high_count',
             'vuln_per_package', 'critical_ratio', 'high_ratio',
             'avg_cvss_score', 'max_cvss_score', 'exploitable_count',
             'avg_epss_score', 'high_epss_count', 'vuln_growth_rate'
         ]
-        
+
+        # Map feature_name → importance → feature_value
+        top_features = []
+        for name, importance in zip(feature_names, importances):
+            if name in features:
+                value = float(features[name])
+                top_features.append((name, float(importance), value))
+
+        # Rank by |value * importance|
         top_features = sorted(
-            zip(feature_names, feature_importance, risk_features),
-            key=lambda x: x[1] * abs(x[2]),  # Importance * value
+            top_features,
+            key=lambda x: x[1] * abs(x[2]),
             reverse=True
-        )[:5]
-        
+        )[:10]
+
+        # Convert to dict for storage
         top_contributing = {
-            feat: {'importance': float(imp), 'value': float(val)}
+            feat: {'importance': imp, 'value': val}
             for feat, imp, val in top_features
         }
+
         
         # Generate recommendations
         recommendations = self._generate_recommendations(
@@ -307,6 +329,8 @@ class SecurityPredictor:
         
         return recommendations
     
+
+    
     def _store_prediction(self, prediction: dict):
         """Store prediction in database"""
         cursor = self.conn.cursor()
@@ -320,14 +344,15 @@ class SecurityPredictor:
         """, (
             prediction['scan_id'],
             prediction['model_version'],
-            prediction['is_anomaly'],
-            prediction['anomaly_score'],
-            prediction['risk_score'],
+            _py(prediction['is_anomaly']),
+            _py(prediction['anomaly_score']),
+            _py(prediction['risk_score']),
             prediction['risk_category'],
-            prediction['confidence_score'],
+            _py(prediction['confidence_score']),
             psycopg2.extras.Json(prediction['top_contributing_features']),
             prediction['recommendations']
         ))
+
         
         self.conn.commit()
         cursor.close()

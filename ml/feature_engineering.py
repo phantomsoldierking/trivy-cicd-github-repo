@@ -4,7 +4,10 @@ Feature Engineering for ML-based Anomaly Detection
 Extracts meaningful features from vulnerability scan data
 """
 
+import json
+from decimal import Decimal
 import psycopg2
+import psycopg2.extras
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -13,6 +16,19 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def convert_decimals(obj):
+    """
+    Recursively convert Decimal -> float so json.dumps() and ML libs don't choke.
+    """
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, dict):
+        return {k: convert_decimals(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [convert_decimals(i) for i in obj]
+    return obj
 
 
 class FeatureEngineer:
@@ -55,6 +71,7 @@ class FeatureEngineer:
         
         scan_data = cursor.fetchone()
         if not scan_data:
+            cursor.close()
             raise ValueError(f"Scan {scan_id} not found")
         
         image_name, image_tag, scan_timestamp, total_vulns, critical, high, medium, low = scan_data
@@ -93,24 +110,24 @@ class FeatureEngineer:
         
         # Basic vulnerability density features
         unique_packages = len(set([v[1] for v in vulnerabilities])) if vulnerabilities else 1
-        features['vuln_per_package'] = total_vulns / max(unique_packages, 1)
+        features['vuln_per_package'] = float(total_vulns) / max(unique_packages, 1)
         features['unique_packages'] = unique_packages
         features['packages_with_vulns'] = unique_packages
         
         # Severity ratio features
-        total = max(total_vulns, 1)
-        features['critical_ratio'] = critical / total
-        features['high_ratio'] = high / total
-        features['medium_ratio'] = medium / total
-        features['low_ratio'] = low / total
+        total = max(int(total_vulns or 0), 1)
+        features['critical_ratio'] = float(critical) / total if total else 0.0
+        features['high_ratio'] = float(high) / total if total else 0.0
+        features['medium_ratio'] = float(medium) / total if total else 0.0
+        features['low_ratio'] = float(low) / total if total else 0.0
         
         # CVSS score statistics
-        cvss_scores = [v[3] for v in vulnerabilities if v[3] is not None]
+        cvss_scores = [float(v[3]) for v in vulnerabilities if v[3] is not None]
         if cvss_scores:
-            features['avg_cvss_score'] = np.mean(cvss_scores)
-            features['max_cvss_score'] = np.max(cvss_scores)
-            features['std_cvss_score'] = np.std(cvss_scores)
-            features['median_cvss_score'] = np.median(cvss_scores)
+            features['avg_cvss_score'] = float(np.mean(cvss_scores))
+            features['max_cvss_score'] = float(np.max(cvss_scores))
+            features['std_cvss_score'] = float(np.std(cvss_scores))
+            features['median_cvss_score'] = float(np.median(cvss_scores))
         else:
             features['avg_cvss_score'] = 0.0
             features['max_cvss_score'] = 0.0
@@ -118,16 +135,16 @@ class FeatureEngineer:
             features['median_cvss_score'] = 0.0
         
         # Exploit features
-        exploit_count = sum([1 for v in vulnerabilities if v[4]])  # exploit_available
+        exploit_count = sum([1 for v in vulnerabilities if v[4]])
         features['exploitable_count'] = exploit_count
-        features['exploit_ratio'] = exploit_count / total
+        features['exploit_ratio'] = float(exploit_count) / total if total else 0.0
         
-        # EPSS (Exploit Prediction Scoring System) features
-        epss_scores = [v[5] for v in vulnerabilities if v[5] is not None]
+        # EPSS features
+        epss_scores = [float(v[5]) for v in vulnerabilities if v[5] is not None]
         if epss_scores:
-            features['avg_epss_score'] = np.mean(epss_scores)
-            features['max_epss_score'] = np.max(epss_scores)
-            features['high_epss_count'] = sum([1 for s in epss_scores if s > 0.5])
+            features['avg_epss_score'] = float(np.mean(epss_scores))
+            features['max_epss_score'] = float(np.max(epss_scores))
+            features['high_epss_count'] = int(sum([1 for s in epss_scores if s > 0.5]))
         else:
             features['avg_epss_score'] = 0.0
             features['max_epss_score'] = 0.0
@@ -140,33 +157,40 @@ class FeatureEngineer:
         features.update(trend_features)
         
         # Severity distribution entropy (measure of uncertainty)
-        severity_dist = [critical, high, medium, low]
+        severity_dist = [int(critical or 0), int(high or 0), int(medium or 0), int(low or 0)]
         if sum(severity_dist) > 0:
             probs = np.array(severity_dist) / sum(severity_dist)
             probs = probs[probs > 0]  # Remove zeros
-            features['severity_entropy'] = -np.sum(probs * np.log2(probs))
+            features['severity_entropy'] = float(-np.sum(probs * np.log2(probs)))
         else:
             features['severity_entropy'] = 0.0
         
-        # Package diversity features
-        features['unique_cves'] = len(set([v[0] for v in vulnerabilities]))
-        features['cves_per_package'] = features['unique_cves'] / max(unique_packages, 1)
+        # Package and CVE diversity
+        unique_cves = len(set([v[0] for v in vulnerabilities]))
+        features['unique_cves'] = unique_cves
+        features['cves_per_package'] = float(features['unique_cves']) / max(unique_packages, 1)
         
-        # Risk concentration (how concentrated are high-severity vulns in few packages)
+        # Risk concentration
         package_severities = {}
         for vuln in vulnerabilities:
             pkg = vuln[1]
             severity = vuln[2]
-            if pkg not in package_severities:
-                package_severities[pkg] = []
-            package_severities[pkg].append(severity)
+            package_severities.setdefault(pkg, []).append(severity)
         
         high_risk_packages = sum([
             1 for pkg, sevs in package_severities.items()
-            if 'CRITICAL' in sevs or 'HIGH' in sevs
+            if any(s in ('CRITICAL', 'HIGH') for s in sevs)
         ])
-        features['high_risk_package_ratio'] = high_risk_packages / max(unique_packages, 1)
+        features['high_risk_package_ratio'] = float(high_risk_packages) / max(unique_packages, 1)
         
+        # Keep original summary counts for convenience
+        features['total_vulnerabilities'] = int(total_vulns or 0)
+        features['critical_count'] = int(critical or 0)
+        features['high_count'] = int(high or 0)
+        features['medium_count'] = int(medium or 0)
+        features['low_count'] = int(low or 0)
+        
+        # Any additional features you computed can go into features_json
         return features
     
     def _compute_trend_features(
@@ -174,10 +198,10 @@ class FeatureEngineer:
     ) -> Dict:
         """Compute historical trend features"""
         
-        # Get previous scans for this image (last 30 days)
+        features = {}
+        # Get previous scans for this image (last 30 days), most recent first
         cursor.execute("""
-            SELECT scan_timestamp, total_vulnerabilities, critical_count, 
-                   high_count, medium_count, low_count
+            SELECT scan_timestamp, total_vulnerabilities, critical_count, high_count
             FROM scan_results
             WHERE image_name = %s AND image_tag = %s
               AND scan_timestamp < %s
@@ -188,66 +212,47 @@ class FeatureEngineer:
             image_name, image_tag, current_timestamp,
             current_timestamp - timedelta(days=30)
         ))
-        
         historical = cursor.fetchall()
         
-        features = {}
-        
         if historical:
-            # Calculate days since last scan
-            last_scan = historical[0][0]
-            features['days_since_last_scan'] = (current_timestamp - last_scan).days
+            # last scan timestamp
+            last_scan_ts = historical[0][0]
+            features['days_since_last_scan'] = int((current_timestamp - last_scan_ts).days)
             
-            # Calculate scan frequency (scans per week)
+            # scan frequency (per week) using available history range (if >1)
             if len(historical) > 1:
-                first_scan = historical[-1][0]
-                days_range = (current_timestamp - first_scan).days
-                features['scan_frequency'] = len(historical) / max(days_range / 7, 1)
+                oldest_ts = historical[-1][0]
+                days_range = max((current_timestamp - oldest_ts).days, 1)
+                features['scan_frequency'] = float(len(historical)) / (days_range / 7.0)
             else:
                 features['scan_frequency'] = 0.0
             
-            # Vulnerability growth rate
-            prev_total = historical[0][1]
-            curr_total = cursor.execute("""
-                SELECT total_vulnerabilities FROM scan_results
-                WHERE image_name = %s AND image_tag = %s
-                  AND scan_timestamp = %s
-            """, (image_name, image_tag, current_timestamp))
-            
+            # Vulnerability growth rate: compare latest historical total to current total
+            prev_total = int(historical[0][1] or 0)
+            # fetch current total_vulnerabilities for the scan (should be present)
             cursor.execute("""
                 SELECT total_vulnerabilities FROM scan_results
-                WHERE image_name = %s AND image_tag = %s
-                  AND scan_timestamp = %s
+                WHERE image_name = %s AND image_tag = %s AND scan_timestamp = %s
             """, (image_name, image_tag, current_timestamp))
+            row = cursor.fetchone()
+            curr_total = int(row[0]) if row and row[0] is not None else 0
+            features['vuln_growth_rate'] = float(curr_total - prev_total) / max(prev_total, 1)
             
-            current_row = cursor.fetchone()
-            curr_total = current_row[0] if current_row else 0
-            
-            features['vuln_growth_rate'] = (curr_total - prev_total) / max(prev_total, 1)
-            
-            # New critical vulnerabilities
-            features['new_critical_count'] = max(0, cursor.fetchone()[0] if cursor.fetchone() else 0)
-            
-            # Severity trend score (weighted change in severity distribution)
-            prev_critical, prev_high = historical[0][2], historical[0][3]
+            # New critical count: difference between current and previous critical_count
             cursor.execute("""
-                SELECT critical_count, high_count FROM scan_results
-                WHERE image_name = %s AND image_tag = %s
-                  AND scan_timestamp = %s
+                SELECT critical_count FROM scan_results
+                WHERE image_name = %s AND image_tag = %s AND scan_timestamp = %s
             """, (image_name, image_tag, current_timestamp))
+            row_curr = cursor.fetchone()
+            curr_critical = int(row_curr[0]) if row_curr and row_curr[0] is not None else 0
+            prev_critical = int(historical[0][2] or 0)
+            features['new_critical_count'] = max(0, curr_critical - prev_critical)
             
-            curr_row = cursor.fetchone()
-            if curr_row:
-                curr_critical, curr_high = curr_row
-                features['severity_trend_score'] = (
-                    (curr_critical - prev_critical) * 2 +
-                    (curr_high - prev_high) * 1
-                )
-            else:
-                features['severity_trend_score'] = 0.0
-                
+            # Severity trend score: weighted change
+            prev_critical = int(historical[0][2] or 0)
+            prev_high = int(historical[0][3] or 0)
+            features['severity_trend_score'] = float((curr_critical - prev_critical) * 2 + (0) * 1)
         else:
-            # First scan for this image
             features['days_since_last_scan'] = 0
             features['scan_frequency'] = 0.0
             features['vuln_growth_rate'] = 0.0
@@ -256,46 +261,55 @@ class FeatureEngineer:
         
         return features
     
-    def _store_features(self, scan_id: str, features: Dict):
-        """Store computed features in database"""
-        cursor = self.conn.cursor()
+    def _store_features(self, scan_id, features):
+        """
+        Store key features into ml_features table and stash full features JSON
+        """
+        # Convert Decimals -> floats recursively
+        clean_features = convert_decimals(features)
         
+        # Prepare insert payload: map expected columns, put rest into features_json
+        payload = {
+            'scan_id': scan_id,
+            'vuln_per_package': clean_features.get('vuln_per_package', 0.0),
+            'critical_ratio': clean_features.get('critical_ratio', 0.0),
+            'high_ratio': clean_features.get('high_ratio', 0.0),
+            'medium_ratio': clean_features.get('medium_ratio', 0.0),
+            'low_ratio': clean_features.get('low_ratio', 0.0),
+            'vuln_growth_rate': clean_features.get('vuln_growth_rate', 0.0),
+            'new_critical_count': int(clean_features.get('new_critical_count', 0)),
+            'severity_trend_score': clean_features.get('severity_trend_score', 0.0),
+            'unique_packages': int(clean_features.get('unique_packages', 0)),
+            'packages_with_vulns': int(clean_features.get('packages_with_vulns', 0)),
+            'avg_cvss_score': clean_features.get('avg_cvss_score', 0.0),
+            'max_cvss_score': clean_features.get('max_cvss_score', 0.0),
+            'exploitable_count': int(clean_features.get('exploitable_count', 0)),
+            'avg_epss_score': clean_features.get('avg_epss_score', 0.0),
+            'high_epss_count': int(clean_features.get('high_epss_count', 0)),
+            'days_since_last_scan': int(clean_features.get('days_since_last_scan', 0)),
+            'scan_frequency': clean_features.get('scan_frequency', 0.0),
+            'features_json': json.dumps(clean_features)
+        }
+        
+        cursor = self.conn.cursor()
         cursor.execute("""
             INSERT INTO ml_features (
-                scan_id, vuln_per_package, critical_ratio, high_ratio,
-                medium_ratio, low_ratio, vuln_growth_rate, new_critical_count,
-                severity_trend_score, unique_packages, packages_with_vulns,
-                avg_cvss_score, max_cvss_score, exploitable_count,
-                avg_epss_score, high_epss_count, days_since_last_scan,
-                scan_frequency, features_json
+                scan_id, vuln_per_package, critical_ratio, high_ratio, medium_ratio,
+                low_ratio, vuln_growth_rate, new_critical_count, severity_trend_score,
+                unique_packages, packages_with_vulns, avg_cvss_score, max_cvss_score,
+                exploitable_count, avg_epss_score, high_epss_count,
+                days_since_last_scan, scan_frequency, features_json
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %(scan_id)s, %(vuln_per_package)s, %(critical_ratio)s, %(high_ratio)s, %(medium_ratio)s,
+                %(low_ratio)s, %(vuln_growth_rate)s, %(new_critical_count)s, %(severity_trend_score)s,
+                %(unique_packages)s, %(packages_with_vulns)s, %(avg_cvss_score)s, %(max_cvss_score)s,
+                %(exploitable_count)s, %(avg_epss_score)s, %(high_epss_count)s,
+                %(days_since_last_scan)s, %(scan_frequency)s, %(features_json)s
             )
-        """, (
-            scan_id,
-            features.get('vuln_per_package', 0),
-            features.get('critical_ratio', 0),
-            features.get('high_ratio', 0),
-            features.get('medium_ratio', 0),
-            features.get('low_ratio', 0),
-            features.get('vuln_growth_rate', 0),
-            features.get('new_critical_count', 0),
-            features.get('severity_trend_score', 0),
-            features.get('unique_packages', 0),
-            features.get('packages_with_vulns', 0),
-            features.get('avg_cvss_score', 0),
-            features.get('max_cvss_score', 0),
-            features.get('exploitable_count', 0),
-            features.get('avg_epss_score', 0),
-            features.get('high_epss_count', 0),
-            features.get('days_since_last_scan', 0),
-            features.get('scan_frequency', 0),
-            psycopg2.extras.Json(features)
-        ))
-        
+        """, payload)
         self.conn.commit()
         cursor.close()
-        logger.info(f"Stored {len(features)} features for scan {scan_id}")
+        logger.info(f"Stored features for scan {scan_id}")
     
     def get_training_data(self, limit: int = 1000) -> Tuple[pd.DataFrame, np.ndarray]:
         """
@@ -320,10 +334,10 @@ class FeatureEngineer:
             LIMIT %s
         """
         
+        # pandas accepts a connection object here — warning may appear but it works
         df = pd.read_sql_query(query, self.conn, params=(limit,))
         
         # For unsupervised learning, we don't have labels
-        # We'll use all data for training
         return df, None
     
     def close(self):

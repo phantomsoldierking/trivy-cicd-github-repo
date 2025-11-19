@@ -27,12 +27,6 @@ class TrivyScanner:
     """Enhanced Trivy vulnerability scanner with database integration"""
     
     def __init__(self, db_config: Dict[str, str]):
-        """
-        Initialize scanner with database configuration
-        
-        Args:
-            db_config: Database connection parameters
-        """
         self.db_config = db_config
         self.conn = None
         self.scan_id = None
@@ -53,16 +47,7 @@ class TrivyScanner:
             raise
     
     def scan_image(self, image_name: str, image_tag: str = "latest") -> Dict:
-        """
-        Scan container image with Trivy
-        
-        Args:
-            image_name: Name of the container image
-            image_tag: Image tag (default: latest)
-            
-        Returns:
-            Dictionary containing scan results
-        """
+        """Scan container image with Trivy"""
         full_image = f"{image_name}:{image_tag}"
         logger.info(f"Starting scan for image: {full_image}")
         
@@ -70,7 +55,6 @@ class TrivyScanner:
         self.scan_id = str(uuid.uuid4())
         
         try:
-            # Run Trivy scan
             cmd = [
                 "trivy", "image",
                 "--format", "json",
@@ -88,14 +72,12 @@ class TrivyScanner:
             
             scan_duration = time.time() - start_time
             
-            if result.returncode != 0 and result.returncode != 1:
+            if result.returncode not in (0, 1):
                 logger.error(f"Trivy scan failed: {result.stderr}")
                 return self._create_error_result(image_name, image_tag, result.stderr)
             
-            # Parse results
             scan_data = json.loads(result.stdout) if result.stdout else {}
             
-            # Process and store results
             processed_results = self._process_scan_results(
                 scan_data, image_name, image_tag, scan_duration
             )
@@ -109,14 +91,8 @@ class TrivyScanner:
             logger.error(f"Scan error: {e}")
             return self._create_error_result(image_name, image_tag, str(e))
     
-    def _process_scan_results(
-        self, 
-        scan_data: Dict, 
-        image_name: str, 
-        image_tag: str,
-        scan_duration: float
-    ) -> Dict:
-        """Process and store scan results"""
+    def _process_scan_results(self, scan_data, image_name, image_tag, scan_duration):
+        """Process Trivy results"""
         
         vulnerabilities = []
         severity_counts = {
@@ -127,13 +103,12 @@ class TrivyScanner:
             'UNKNOWN': 0
         }
         
-        # Extract vulnerabilities from scan data
         results = scan_data.get('Results', [])
         for result in results:
             vulns = result.get('Vulnerabilities', [])
             for vuln in vulns:
                 severity = vuln.get('Severity', 'UNKNOWN')
-                severity_counts[severity] = severity_counts.get(severity, 0) + 1
+                severity_counts[severity] += 1
                 
                 vulnerabilities.append({
                     'cve_id': vuln.get('VulnerabilityID', 'N/A'),
@@ -143,17 +118,15 @@ class TrivyScanner:
                     'severity': severity,
                     'cvss_score': self._extract_cvss_score(vuln),
                     'description': vuln.get('Description', '')[:1000],
-                    'references': vuln.get('References', []),
+                    'reference_urls': vuln.get('References', []) or [],
                     'published_date': vuln.get('PublishedDate'),
-                    'last_modified_date': vuln.get('LastModifiedDate')
+                    'last_modified_date': vuln.get('LastModifiedDate'),
+                    'exploit_available': vuln.get('Exploit', False),
+                    'epss_score': vuln.get('EPSS', 0.0)
                 })
         
-        # Store in database
         if self.conn:
-            self._store_results(
-                image_name, image_tag, vulnerabilities, 
-                severity_counts, scan_duration
-            )
+            self._store_results(image_name, image_tag, vulnerabilities, severity_counts, scan_duration)
         
         return {
             'scan_id': self.scan_id,
@@ -165,56 +138,47 @@ class TrivyScanner:
             'scan_duration': scan_duration,
             'scan_timestamp': datetime.now().isoformat()
         }
-    
-    def _extract_cvss_score(self, vuln: Dict) -> Optional[float]:
-        """Extract CVSS score from vulnerability data"""
+
+    def _extract_cvss_score(self, vuln):
+        """Extract CVSS score"""
         cvss = vuln.get('CVSS', {})
         if isinstance(cvss, dict):
-            # Try different CVSS versions
-            for version in ['nvd', 'redhat', 'ghsa']:
-                if version in cvss:
-                    v3_score = cvss[version].get('V3Score')
-                    if v3_score:
-                        return float(v3_score)
+            for vendor in ['nvd', 'redhat', 'ghsa']:
+                if vendor in cvss:
+                    v3 = cvss[vendor].get('V3Score')
+                    if v3:
+                        return float(v3)
         return None
     
-    def _store_results(
-        self,
-        image_name: str,
-        image_tag: str,
-        vulnerabilities: List[Dict],
-        severity_counts: Dict,
-        scan_duration: float
-    ):
-        """Store scan results in database"""
+    def _store_results(self, image_name, image_tag, vulnerabilities, severity_counts, scan_duration):
+        """Store scan + vulnerability details in PostgreSQL"""
         try:
             cursor = self.conn.cursor()
             
-            # Insert scan result
             cursor.execute("""
                 INSERT INTO scan_results (
                     scan_id, image_name, image_tag, total_vulnerabilities,
-                    critical_count, high_count, medium_count, low_count, 
+                    critical_count, high_count, medium_count, low_count,
                     unknown_count, scan_duration_seconds
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 self.scan_id, image_name, image_tag, len(vulnerabilities),
-                severity_counts.get('CRITICAL', 0),
-                severity_counts.get('HIGH', 0),
-                severity_counts.get('MEDIUM', 0),
-                severity_counts.get('LOW', 0),
-                severity_counts.get('UNKNOWN', 0),
+                severity_counts['CRITICAL'],
+                severity_counts['HIGH'],
+                severity_counts['MEDIUM'],
+                severity_counts['LOW'],
+                severity_counts['UNKNOWN'],
                 scan_duration
             ))
             
-            # Insert vulnerabilities
             for vuln in vulnerabilities:
                 cursor.execute("""
                     INSERT INTO vulnerabilities (
                         scan_id, cve_id, package_name, installed_version,
                         fixed_version, severity, cvss_score, description,
-                        references, published_date, last_modified_date
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        reference_urls, published_date, last_modified_date,
+                        exploit_available, epss_score
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     self.scan_id,
                     vuln['cve_id'],
@@ -224,23 +188,24 @@ class TrivyScanner:
                     vuln['severity'],
                     vuln['cvss_score'],
                     vuln['description'],
-                    vuln['references'],
+                    vuln['reference_urls'],
                     vuln['published_date'],
-                    vuln['last_modified_date']
+                    vuln['last_modified_date'],
+                    vuln['exploit_available'],
+                    vuln['epss_score']
                 ))
             
             self.conn.commit()
-            logger.info(f"Stored {len(vulnerabilities)} vulnerabilities in database")
-            
+            logger.info(f"Stored {len(vulnerabilities)} vulnerabilities")
+        
         except Exception as e:
-            logger.error(f"Database storage error: {e}")
+            logger.error(f"Database error: {e}")
             self.conn.rollback()
             raise
         finally:
             cursor.close()
-    
-    def _create_error_result(self, image_name: str, image_tag: str, error: str) -> Dict:
-        """Create error result structure"""
+
+    def _create_error_result(self, image_name, image_tag, error):
         return {
             'scan_id': str(uuid.uuid4()),
             'image_name': image_name,
@@ -254,17 +219,14 @@ class TrivyScanner:
         }
     
     def close(self):
-        """Close database connection"""
         if self.conn:
             self.conn.close()
             logger.info("Database connection closed")
 
 
 def main():
-    """Main execution function"""
     import os
     
-    # Database configuration from environment
     db_config = {
         'host': os.getenv('DB_HOST', 'postgres'),
         'port': os.getenv('DB_PORT', '5432'),
@@ -285,26 +247,24 @@ def main():
     try:
         scanner.connect_db()
         results = scanner.scan_image(image_name, image_tag)
-        
-        # Print summary
+
         print("\n" + "="*60)
         print("SCAN SUMMARY")
         print("="*60)
         print(f"Image: {results['image_name']}:{results['image_tag']}")
         print(f"Scan ID: {results['scan_id']}")
         print(f"Total Vulnerabilities: {results['total_vulnerabilities']}")
-        print(f"\nSeverity Breakdown:")
-        for severity, count in results['severity_counts'].items():
-            print(f"  {severity}: {count}")
+        print("\nSeverity Breakdown:")
+        for sev, count in results['severity_counts'].items():
+            print(f"  {sev}: {count}")
         print(f"\nScan Duration: {results['scan_duration']:.2f} seconds")
         print("="*60)
-        
-        # Save detailed results
+
         output_file = f"scan_results_{results['scan_id']}.json"
         with open(output_file, 'w') as f:
             json.dump(results, f, indent=2)
-        print(f"\nDetailed results saved to: {output_file}")
-        
+        print(f"\nSaved: {output_file}")
+
     except Exception as e:
         logger.error(f"Scan failed: {e}")
         sys.exit(1)
