@@ -2,6 +2,10 @@
 
 An advanced, end-to-end container vulnerability scanning and anomaly detection system powered by machine learning. Runs entirely on LocalStack for cost-free development and testing.
 
+## Architecture
+<img width="1249" height="694" alt="image" src="https://github.com/user-attachments/assets/0f3fd4f7-1387-47af-a08b-4a76c419ebd0" />
+
+
 ##  Features
 
 ### Core Capabilities
